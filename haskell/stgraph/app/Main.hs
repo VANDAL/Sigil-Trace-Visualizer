@@ -1,5 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings, GADTs, DuplicateRecordFields #-}
 
 module Main where
 
@@ -45,10 +44,6 @@ parseArgs = Args
         <> short 'o'
         <> help "Destination of DOT-formatted graph" )
 
-dostuff :: Args -> IO ()
-dostuff (Args i o) = (show . parseEvent <$>) <$> readGz i >>= mapM_ putStrLn
-
-
 ---------------------------------------------------------------------
 -- Reading in traces
 
@@ -93,10 +88,10 @@ digitErr = Set.singleton $ Tokens $ zero NE.:| [one, two, three, four, five, six
 digitChars = some digitChar
 hexDigitChars = string hexHeader >> some hexDigitChar
 
+-- TODO should probably do some checking here >.<
 parseDec :: MegaParser Int
-parseDec = (fst . head . readDec . BC.unpack . B.pack) <$> digitChars
-
 parseHex :: MegaParser Int
+parseDec = (fst . head . readDec . BC.unpack . B.pack) <$> digitChars
 parseHex = (fst . head . readHex . BC.unpack . B.pack) <$> hexDigitChars
 
 readDecFromCSVs :: MegaParser [Int]
@@ -154,16 +149,31 @@ endEvent = eof >> return End
 stEvent :: MegaParser StEvent
 stEvent = try (stEventHeader >> (try compEvent <|> try syncEvent <|> commEvent)) <|> endEvent
 
-parseEvent :: LBC.ByteString -> Either (Text.Megaparsec.ParseError (Token LBC.ByteString) Void) StEvent
-parseEvent bs = parse stEvent "" bs
+parseEvent :: LBC.ByteString -> StEvent
+parseEvent bs = case parse stEvent "" bs of
+                  -- bail out and error on a parse error,
+                  -- no point in continuing
+                  Left parseError -> error $ show parseError
+                  Right event -> event
 
 ---------------------------------------------------------------------
 -- Writing out to GraphViz
 
+-- aggregate of different data types
+data GvNode = GvNode { iops      :: Int,
+                       flops     :: Int,
+                       reads     :: Int,
+                       writes    :: Int,
+                       commBytes :: Int }
+            deriving (Show)
+
 ---------------------------------------------------------------------
 -- Main
 main :: IO ()
-main = execParser opts >>= dostuff
+main = execParser opts >>= printTrace
     where
         opts = info (parseArgs <**> helper)
             (fullDesc <> progDesc "Read a gz" <> header "stgraph - graph")
+
+printTrace :: Args -> IO ()
+printTrace (Args i o) = mapM_ (print . parseEvent) =<< readGz i
