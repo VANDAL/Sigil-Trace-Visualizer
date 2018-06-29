@@ -29,6 +29,13 @@ dependencies:
 - parsec
 - megaparsec
 - containers
+- fgl
+- mtl
+# graphviz is not in stack and requires us
+# to pull it the version manually in stack.yaml 
+- graphviz
+- wl-pprint-text
+- base-compat
 
 library:
   source-dirs: src
