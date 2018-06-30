@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, GADTs, DuplicateRecordFields #-}
+{-# LANGUAGE OverloadedStrings, GADTs #-}
 
 module Main where
 
@@ -7,6 +7,7 @@ import Lib
 import Numeric
 import Data.Monoid
 import Data.List
+
 import Data.Void
 import Data.Word
 import Debug.Trace
@@ -39,11 +40,15 @@ import Data.Graph.Inductive.PatriciaTree
 
 ---------------------------------------------------------------------
 -- Trace representation
-data StEvent = Sync { ty :: Int,  addr :: Int }
-             | Comm { bytes :: Int }
-             | Comp { iops :: Int, flops :: Int, reads :: Int, writes :: Int }
+data StEvent = Sync { ty     :: !Int,
+                      addr   :: !Int }
+             | Comm { bytes  :: !Int }
+             | Comp { iops   :: !Int,
+                      flops  :: !Int,
+                      reads  :: !Int,
+                      writes :: !Int }
              | End -- simplify parsing; eventually we'll parse the EOF and have to return a StEvent
-             deriving (Eq, Show)
+             deriving (Eq, Show, Ord)
 type StTrace = [StEvent]
 
 ---------------------------------------------------------------------
@@ -171,13 +176,13 @@ parseEvent bs = case parse stEvent "" bs of
 -- Generate a graph from event trace
 
 newtype StContainedEvents = StContainedEvents (Bool, Bool) deriving (Show)
-data StNodeData = StNodeData { syncTy       :: Int,
-                               syncAddr     :: Int,
-                               aggIops      :: Int,
-                               aggFlops     :: Int,
-                               aggReads     :: Int,
-                               aggWrites    :: Int,
-                               aggCommBytes :: Int } deriving (Show)
+data StNodeData = StNodeData { syncTy       :: !Int,
+                               syncAddr     :: !Int,
+                               aggIops      :: !Int,
+                               aggFlops     :: !Int,
+                               aggReads     :: !Int,
+                               aggWrites    :: !Int,
+                               aggCommBytes :: !Int } deriving (Show)
 -- Aggregate of Sync/Comm/Comp event types
 
 type StNode = LNode StNodeData
@@ -191,21 +196,21 @@ type StGraph' = (StGraph, StNode)
 -- (and to prevent it from just looking like the text trace).
 
 graphTrace :: StTrace -> StGraph
-graphTrace evs = mergeLast $ graphTrace' evs
+graphTrace = graphTrace' >>> mergeLast
     where
         mergeLast (gr, last) = insNode last gr
 
 graphTrace' :: StTrace -> StGraph'
-graphTrace' (ev:evs) = foldl' insEvent initGr evs
+graphTrace' = foldl' insEvent initGr
     where
-        firstNode = makeStNode 0 ev
+        firstNode = makeStNode 0 (Sync 0 0) -- start with an empty event
         initGr = (Graph.empty, firstNode)
 
 insEvent :: StGraph' -> StEvent -> StGraph'
 insEvent gr' End = gr'
-insEvent (gr, last@(node, _)) event = maybe def setNode (tryMerge last event)
+insEvent (gr, last@(node, _)) event = maybe default' setNode (tryMerge last event)
     where
-        def = (mergeLast, makeStNode (succ node) event)
+        default' = (mergeLast, makeStNode (succ node) event)
         mergeLast = insNode last gr
         setNode merged = (gr, merged)
 
@@ -278,9 +283,6 @@ main = execParser opts >>= \(Args i _) -> printGraph i
 
 printGraph :: FilePath -> IO ()
 printGraph = readGz >=> map parseEvent >>> graphTrace >>> prettyPrint
--- TODO Something here is causing the entire trace to be held in memory.
--- For a relatively small trace (~40MB gzipped), this is about 2.5GB.
--- This needs to optimized to lazily fold over the stream of [StEvent].
 
 printTrace :: FilePath -> IO ()
 printTrace = readGz >=> mapM_ (parseEvent >>> print)
