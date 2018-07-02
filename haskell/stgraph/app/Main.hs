@@ -1,28 +1,29 @@
-{-# LANGUAGE OverloadedStrings, GADTs #-}
+{-# LANGUAGE OverloadedStrings, GADTs, BangPatterns #-}
 
 module Main where
 
-import Prelude hiding (reads)
 import Lib
-import Numeric
-import Data.Monoid
-import Data.List
-
-import Data.Void
-import Data.Word
-import Debug.Trace
-import Control.Monad
-import Control.Monad.State.Lazy
 import Control.Arrow
+import Control.Monad.State.Lazy
+
+import Prelude hiding (reads, putStr)
+import Data.List (head, map, foldl')
+import Data.Tuple (swap)
+import Data.Monoid (Sum(..), getSum, (<>))
 
 -- options parsing
-import Options.Applicative hiding (Parser, many, some)
+import Options.Applicative (execParser, info, helper,
+                            fullDesc, progDesc, header,
+                            strOption, long, short, help,
+                            (<*>), (<**>))
 import qualified Options.Applicative as OptParse
 
 -- trace parsing
 import Text.Megaparsec hiding (Parser, State)
 import Text.Megaparsec.Byte
-import Data.ByteString.Conversion
+import Data.ByteString.Conversion (fromByteString)
+import Data.Void (Void)
+import Numeric (readDec, readHex)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Set as Set
 
@@ -33,10 +34,13 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
 
 -- DOT format out
-import Data.GraphViz.Types.Canonical
-import Data.Graph.Inductive.Graph
 import qualified Data.Graph.Inductive.Graph as Graph
-import Data.Graph.Inductive.PatriciaTree
+import Data.Graph.Inductive.Graph (Node, LNode, Edge, LEdge, UEdge,
+                                   insNode, insEdge, prettyPrint)
+import Data.Graph.Inductive.PatriciaTree (Gr)
+import Data.GraphViz (GraphvizParams, graphToDot, defaultParams, )
+import Data.GraphViz.Types (printDotGraph)
+import Data.Text.Lazy.IO (putStr)
 
 ---------------------------------------------------------------------
 -- Trace representation
@@ -172,6 +176,9 @@ parseEvent bs = case parse stEvent "" bs of
                     Left parseError -> error $ show parseError
                     Right event -> event
 
+parseTrace :: [LBC.ByteString] -> StTrace
+parseTrace = map parseEvent
+
 ---------------------------------------------------------------------
 -- Generate a graph from event trace
 
@@ -187,7 +194,7 @@ data StNodeData = StNodeData { syncTy       :: !Int,
 
 type StNode = LNode StNodeData
 type StEdge = UEdge -- Labels for edges are not required for current use case
-type StGraph = Gr StNodeData StEdge
+type StGraph = Gr StNodeData ()
 type StGraph' = (StGraph, StNode)
 -- Graph types
 -- We use a tuple of (normal graph, last node) to track state because
@@ -196,23 +203,25 @@ type StGraph' = (StGraph, StNode)
 -- (and to prevent it from just looking like the text trace).
 
 graphTrace :: StTrace -> StGraph
-graphTrace = graphTrace' >>> mergeLast
-    where
-        mergeLast (gr, last) = insNode last gr
+graphTrace = graphTrace' >>> swap >>> uncurry insNode
 
 graphTrace' :: StTrace -> StGraph'
 graphTrace' = foldl' insEvent initGr
     where
-        firstNode = makeStNode 0 (Sync 0 0) -- start with an empty event
+        firstNode = makeStNode 0 (Sync 0 0) -- start with any 'empty' event
         initGr = (Graph.empty, firstNode)
 
 insEvent :: StGraph' -> StEvent -> StGraph'
 insEvent gr' End = gr'
-insEvent (gr, last@(node, _)) event = maybe default' setNode (tryMerge last event)
+insEvent (!gr, last@(!node, !_)) event = maybe default' setNode $ tryMerge last event
+    -- NB Free up memory by forcing evaluation of the inner pair elements
     where
-        default' = (mergeLast, makeStNode (succ node) event)
-        mergeLast = insNode last gr
-        setNode merged = (gr, merged)
+        setNode = (,) gr
+        nextNode = succ node
+        nextStEdge = (node, nextNode, ())
+        nextStNode = makeStNode nextNode event
+        nextGraph = insEdge nextStEdge $ insNode last gr
+        default' = (nextGraph, nextStNode)
 
 makeStNode :: Node -> StEvent -> StNode
 -- TODO Do we ever start from a Comp or Comm event?
@@ -235,7 +244,7 @@ tryMerge (node, nodeData) (Comp i f r w) = Just $ (node, merged)
                             (r + aggReads  nodeData)
                             (w + aggWrites nodeData)
                             (aggCommBytes nodeData)
-tryMerge (node, nodeData) (Comm b) = Just $ (node, merged)
+tryMerge (node, !nodeData) (Comm b) = Just $ (node, merged)
     where
         merged = StNodeData (syncTy    nodeData)
                             (syncAddr  nodeData)
@@ -248,41 +257,23 @@ tryMerge _ _ = Nothing -- can't merge Sync events
 
 ---------------------------------------------------------------------
 -- Write out to GraphViz
--- As we fold over the events of a trace, build up graph nodes which
--- can merge (SynchroTrace) computation and communication events.
--- Synchronization events are hard stopping points where we write out
--- the node we've been building up, and also write the edge to the
--- sync event.
 
--- NB this does not include other traces. It only uses the information
--- of the provided trace. Amend the graph with edges between
--- other traces (threads), will require additional context.
-
--- aggregate of Comm/Comp event types
-------------newtype StContainedEvents = StContainedEvents (Bool, Bool)
-------------                          deriving (Show)
-------------data StNodeData = StNodeData { iops      :: Int,
-------------                               flops     :: Int,
-------------                               reads     :: Int,
-------------                               writes    :: Int,
-------------                               commBytes :: Int }
-------------                deriving (Show)
-------------data StNode = State StContainedEvents StNodeData
-------------            deriving (Show)
-------------
-------------stDotGraph :: [StEvent] -> DotGraph
-------------stDotGraph = DotGraph True True
+defaultParams' :: GraphvizParams Node StNodeData () Int StNodeData
+defaultParams' = defaultParams
 
 ---------------------------------------------------------------------
 -- Main
 main :: IO ()
-main = execParser opts >>= \(Args i _) -> printGraph i
+main = execParser opts >>= \(Args i _) -> readGz i >>= printDot
     where
         opts = info (parseArgs <**> helper)
             (fullDesc <> progDesc "Read a gz" <> header "stgraph - graph")
 
-printGraph :: FilePath -> IO ()
-printGraph = readGz >=> map parseEvent >>> graphTrace >>> prettyPrint
+printTrace :: [LBC.ByteString] -> IO ()
+printTrace = parseTrace >>> mapM_ print
 
-printTrace :: FilePath -> IO ()
-printTrace = readGz >=> mapM_ (parseEvent >>> print)
+printGraph :: [LBC.ByteString] -> IO ()
+printGraph = parseTrace >>> graphTrace >>> prettyPrint
+
+printDot :: [LBC.ByteString] -> IO ()
+printDot = parseTrace >>> graphTrace >>> graphToDot defaultParams' >>> printDotGraph >>> putStr
