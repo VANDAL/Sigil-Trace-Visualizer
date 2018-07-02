@@ -114,21 +114,18 @@ parseDec = (fst . head . readDec . BC.unpack . B.pack) <$> digitChars
 parseHex = (fst . head . readHex . BC.unpack . B.pack) <$> hexDigitChars
 
 readDecFromCSVs :: MegaParser [Int]
-readDecFromCSVs = (fromByteString . B.pack <$>) <$> (digitChars `sepBy` char comma) >>= intOrErr
+readDecFromCSVs = (fromByteString . B.pack <$>) <$> (digitChars `sepBy` char comma) >>= intListOrErr
     where
-        intOrErr :: [Maybe Int] -> MegaParser [Int]
-        intOrErr x = case sequence x of
-                         Nothing -> failure Nothing $ digitErr
-                         Just xs -> return xs
-                         -- parse error, this is a bit redundant
-                         -- because we already fail on a pattern match
-                         -- failure later on
+        intListOrErr = sequence >>> maybe fail' return
+        fail' = failure Nothing $ digitErr
+        -- parse error, this is a bit redundant because we already fail
+        -- on a pattern match failure later on
 
 stEventHeader :: MegaParser (Int, Int)
 stEventHeader = do
     eid <- space >> parseDec
     tid <- char comma >> parseDec
-    return (eid, tid)
+    return $ (eid, tid)
 
 syncEvent :: MegaParser StEvent
 syncEvent = do
@@ -170,11 +167,10 @@ stEvent = try (stEventHeader >>
           <|> endEvent
 
 parseEvent :: LBC.ByteString -> StEvent
-parseEvent bs = case parse stEvent "" bs of
-                    -- bail out and error on a parse error,
-                    -- no point in continuing
-                    Left parseError -> error $ show parseError
-                    Right event -> event
+parseEvent = parse stEvent "" >>> either errorOut id
+    where
+        errorOut err = error $ show err
+        -- bail out and error on a parse error; no point in continuing
 
 parseTrace :: [LBC.ByteString] -> StTrace
 parseTrace = map parseEvent
@@ -244,7 +240,7 @@ tryMerge (node, nodeData) (Comp i f r w) = Just $ (node, merged)
                             (r + aggReads  nodeData)
                             (w + aggWrites nodeData)
                             (aggCommBytes nodeData)
-tryMerge (node, !nodeData) (Comm b) = Just $ (node, merged)
+tryMerge (node, nodeData) (Comm b) = Just $ (node, merged)
     where
         merged = StNodeData (syncTy    nodeData)
                             (syncAddr  nodeData)
