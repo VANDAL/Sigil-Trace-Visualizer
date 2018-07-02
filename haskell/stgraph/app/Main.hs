@@ -43,6 +43,23 @@ import Data.GraphViz.Types (printDotGraph)
 import Data.Text.Lazy.IO (putStr)
 
 ---------------------------------------------------------------------
+-- Main
+main :: IO ()
+main = execParser opts >>= \(Args i _) -> readGz i >>= printDot
+    where
+        opts = info (parseArgs <**> helper)
+            (fullDesc <> progDesc "Read a gz" <> header "stgraph - graph")
+
+printTrace :: [LBC.ByteString] -> IO ()
+printTrace = parseTrace >>> mapM_ print
+
+printGraph :: [LBC.ByteString] -> IO ()
+printGraph = parseTrace >>> graphTrace >>> prettyPrint
+
+printDot :: [LBC.ByteString] -> IO ()
+printDot = parseTrace >>> graphTrace >>> graphToDot defaultParams' >>> printDotGraph >>> putStr
+
+---------------------------------------------------------------------
 -- Trace representation
 data StEvent = Sync { ty     :: !Int,
                       addr   :: !Int }
@@ -177,7 +194,6 @@ parseTrace = map parseEvent
 
 ---------------------------------------------------------------------
 -- Generate a graph from event trace
-
 newtype StContainedEvents = StContainedEvents (Bool, Bool) deriving (Show)
 data StNodeData = StNodeData { syncTy       :: !Int,
                                syncAddr     :: !Int,
@@ -253,23 +269,5 @@ tryMerge _ _ = Nothing -- can't merge Sync events
 
 ---------------------------------------------------------------------
 -- Write out to GraphViz
-
 defaultParams' :: GraphvizParams Node StNodeData () Int StNodeData
 defaultParams' = defaultParams
-
----------------------------------------------------------------------
--- Main
-main :: IO ()
-main = execParser opts >>= \(Args i _) -> readGz i >>= printDot
-    where
-        opts = info (parseArgs <**> helper)
-            (fullDesc <> progDesc "Read a gz" <> header "stgraph - graph")
-
-printTrace :: [LBC.ByteString] -> IO ()
-printTrace = parseTrace >>> mapM_ print
-
-printGraph :: [LBC.ByteString] -> IO ()
-printGraph = parseTrace >>> graphTrace >>> prettyPrint
-
-printDot :: [LBC.ByteString] -> IO ()
-printDot = parseTrace >>> graphTrace >>> graphToDot defaultParams' >>> printDotGraph >>> putStr
