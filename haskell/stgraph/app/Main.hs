@@ -27,7 +27,9 @@ import Numeric (readDec, readHex)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Set as Set
 
--- gzip decompression
+-- I/O
+import System.Directory (getDirectoryContents)
+import System.FilePath.Posix (takeExtension)
 import qualified Codec.Compression.GZip as GZip
 import qualified Data.ByteString.Lazy.Char8 as LBC -- required by GZip
 import qualified Data.ByteString as B
@@ -38,7 +40,10 @@ import qualified Data.Graph.Inductive.Graph as Graph
 import Data.Graph.Inductive.Graph (Node, LNode, Edge, LEdge, UEdge,
                                    insNode, insEdge, prettyPrint)
 import Data.Graph.Inductive.PatriciaTree (Gr)
-import Data.GraphViz (GraphvizParams, graphToDot, defaultParams, )
+import Data.GraphViz (GraphvizParams, graphToDot,
+                      defaultParams, nonClusteredParams,
+                      Attributes, fmtNode)
+import Data.GraphViz.Attributes (toLabel)
 import Data.GraphViz.Types (printDotGraph)
 import Data.Text.Lazy.IO (putStr)
 
@@ -57,7 +62,7 @@ printGraph :: [LBC.ByteString] -> IO ()
 printGraph = parseTrace >>> graphTrace >>> prettyPrint
 
 printDot :: [LBC.ByteString] -> IO ()
-printDot = parseTrace >>> graphTrace >>> graphToDot defaultParams' >>> printDotGraph >>> putStr
+printDot = parseTrace >>> graphTrace >>> graphToDot stGraphVizParams >>> printDotGraph >>> putStr
 
 ---------------------------------------------------------------------
 -- Trace representation
@@ -68,7 +73,7 @@ data StEvent = Sync { ty     :: !Int,
                       flops  :: !Int,
                       reads  :: !Int,
                       writes :: !Int }
-             | End -- simplify parsing; eventually we'll parse the EOF and have to return a StEvent
+             | End -- simplify parsing; eventually we'll parse the EOF and have to evaluate to a StEvent
              deriving (Eq, Show, Ord)
 type StTrace = [StEvent]
 
@@ -85,12 +90,15 @@ parseArgs = Args
     <*> strOption
         ( long "output"
         <> short 'o'
-        <> help "Destination of DOT-formatted graph" )
+        <> help "Destination of DOT-formatted file" )
 
 ---------------------------------------------------------------------
--- Read a gzipped trace
+-- File I/O
 readGz :: FilePath -> IO [LBC.ByteString]
-readGz = LBC.readFile >=> GZip.decompress >>> LBC.split '\n' >>> return
+readGz = LBC.readFile >=> GZip.decompress >>> LBC.split '\n' >>> pure
+
+getGzFiles :: FilePath -> IO [FilePath]
+getGzFiles = getDirectoryContents >=> filter (takeExtension >>> (==) ".gz") >>> pure
 
 ---------------------------------------------------------------------
 -- Parse the input trace
@@ -133,7 +141,7 @@ parseHex = (fst . head . readHex . BC.unpack . B.pack) <$> hexDigitChars
 readDecFromCSVs :: MegaParser [Int]
 readDecFromCSVs = (fromByteString . B.pack <$>) <$> (digitChars `sepBy` char comma) >>= intListOrErr
     where
-        intListOrErr = sequence >>> maybe fail' return
+        intListOrErr = sequence >>> maybe fail' pure
         fail' = failure Nothing $ digitErr
         -- parse error, this is a bit redundant because we already fail
         -- on a pattern match failure later on
@@ -142,7 +150,7 @@ stEventHeader :: MegaParser (Int, Int)
 stEventHeader = do
     eid <- space >> parseDec
     tid <- char comma >> parseDec
-    return $ (eid, tid)
+    pure $ (eid, tid)
 
 syncEvent :: MegaParser StEvent
 syncEvent = do
@@ -150,14 +158,14 @@ syncEvent = do
     ty <- parseDec
     addr <- char caret >> parseHex
     many anyChar
-    return $ Sync ty addr
+    pure $ Sync ty addr
 
 compEvent :: MegaParser StEvent
 compEvent = do
     char comma
     [iops, flops, reads, writes] <- readDecFromCSVs
     many anyChar
-    return $ Comp iops flops reads writes
+    pure $ Comp iops flops reads writes
 
 -- Communication events require additional logic because there is no
 -- total reads or total bytes read field.
@@ -167,16 +175,16 @@ commEdge = do
     space >> char pound >> space >> digitChars >> space >> digitChars >> space
     from <- parseHex
     to <- space >> parseHex
-    return $ Sum (to - from + 1)
+    pure $ Sum (to - from + 1)
 
 commEvent :: MegaParser StEvent
 commEvent = do
     edges <- some $ try commEdge
     many anyChar
-    return $ Comm $ getSum $ mconcat edges
+    pure $ Comm $ getSum $ mconcat edges
 
 endEvent :: MegaParser StEvent
-endEvent = eof >> return End
+endEvent = eof >> pure End
 
 stEvent :: MegaParser StEvent
 stEvent = try (stEventHeader >>
@@ -269,5 +277,7 @@ tryMerge _ _ = Nothing -- can't merge Sync events
 
 ---------------------------------------------------------------------
 -- Write out to GraphViz
-defaultParams' :: GraphvizParams Node StNodeData () Int StNodeData
-defaultParams' = defaultParams
+stGraphVizParams = nonClusteredParams { fmtNode = nodeLabel }
+
+nodeLabel :: StNode -> Attributes
+nodeLabel (n, l) = [toLabel $ show l]
