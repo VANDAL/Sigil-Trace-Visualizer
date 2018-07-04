@@ -2,6 +2,7 @@
 
 module Main where
 
+
 import Lib
 import Control.Arrow
 import Control.Monad.State.Lazy
@@ -28,7 +29,7 @@ import qualified Data.List.NonEmpty as NE
 import qualified Data.Set as Set
 
 -- I/O
-import System.Directory (getDirectoryContents)
+import System.Directory (listDirectory)
 import System.FilePath.Posix (takeExtension)
 import qualified Codec.Compression.GZip as GZip
 import qualified Data.ByteString.Lazy.Char8 as LBC -- required by GZip
@@ -38,6 +39,7 @@ import qualified Data.ByteString.Char8 as BC
 -- DOT format out
 import qualified Data.Graph.Inductive.Graph as Graph
 import Data.Graph.Inductive.Graph (Node, LNode, Edge, LEdge, UEdge,
+                                   labNodes, labEdges, mkGraph,
                                    insNode, insEdge, prettyPrint)
 import Data.Graph.Inductive.PatriciaTree (Gr)
 import Data.GraphViz (GraphvizParams, graphToDot,
@@ -50,19 +52,23 @@ import Data.Text.Lazy.IO (putStr)
 ---------------------------------------------------------------------
 -- Main
 main :: IO ()
-main = execParser opts >>= \(Args i _) -> readGz i >>= printDot
+main = execParser opts >>= \(Args i _) -> getGzFiles i >>= printCombinedGraph
     where
         opts = info (parseArgs <**> helper)
             (fullDesc <> progDesc "Read a gz" <> header "stgraph - graph")
 
+getCombinedGraph :: [FilePath] -> IO StGraph
+getCombinedGraph = mapM (readGz >=> parseTrace >>> pure) >=> graphTraces >>> pure
+printCombinedGraph = getCombinedGraph >=> printDot
+
+printGzsInDir :: FilePath -> IO ()
+printGzsInDir = getGzFiles >=> mapM_ print
+
 printTrace :: [LBC.ByteString] -> IO ()
 printTrace = parseTrace >>> mapM_ print
 
-printGraph :: [LBC.ByteString] -> IO ()
-printGraph = parseTrace >>> graphTrace >>> prettyPrint
-
-printDot :: [LBC.ByteString] -> IO ()
-printDot = parseTrace >>> graphTrace >>> graphToDot stGraphVizParams >>> printDotGraph >>> putStr
+printDot :: StGraph -> IO ()
+printDot = graphToDot stGraphVizParams >>> printDotGraph >>> putStr
 
 ---------------------------------------------------------------------
 -- Trace representation
@@ -98,11 +104,18 @@ readGz :: FilePath -> IO [LBC.ByteString]
 readGz = LBC.readFile >=> GZip.decompress >>> LBC.split '\n' >>> pure
 
 getGzFiles :: FilePath -> IO [FilePath]
-getGzFiles = getDirectoryContents >=> filter (takeExtension >>> (==) ".gz") >>> pure
+getGzFiles dir = listDirectory dir >>= (filter (takeExtension >>> (==) ".gz") >>> map (dir <>) >>> pure)
 
 ---------------------------------------------------------------------
 -- Parse the input trace
+parseTraces :: [[LBC.ByteString]] -> [StTrace]
+parseTraces = map parseTrace
+
+parseTrace :: [LBC.ByteString] -> StTrace
+parseTrace = map parseEvent
+
 type MegaParser = Parsec Void LBC.ByteString
+-- Use Megaparsec
 
 -- These definitions are required because we are working with Word8's.
 -- If there was an implicit conversion from Char to Word8,
@@ -197,9 +210,6 @@ parseEvent = parse stEvent "" >>> either errorOut id
         errorOut err = error $ show err
         -- bail out and error on a parse error; no point in continuing
 
-parseTrace :: [LBC.ByteString] -> StTrace
-parseTrace = map parseEvent
-
 ---------------------------------------------------------------------
 -- Generate a graph from event trace
 newtype StContainedEvents = StContainedEvents (Bool, Bool) deriving (Show)
@@ -222,8 +232,24 @@ type StGraph' = (StGraph, StNode)
 -- from becoming unwieldy.
 -- (and to prevent it from just looking like the text trace).
 
+graphTraces :: [StTrace] -> StGraph
+graphTraces = foldl' mergeGraphs Graph.empty
+-- XXX BUG because all graphs are initialized with the same node (0),
+-- each thread (trace) is not distinguised in the final graph.
+-- They are literally merged together :(.
+
+mergeGraphs :: StGraph -> StTrace -> StGraph
+mergeGraphs gr tr = merge' (gr, graphTrace tr)
+    where
+        -- Experimenting with arrows; sorry future self
+        merge' = mergeLabNs &&& mergeLabEs >>> uncurry mkGraph
+        mergeLabNs = combine labNodes
+        mergeLabEs = combine labEdges
+        combine f = uncurry (***) (split f) >>> uncurry (++)
+        split = id &&& id
+
 graphTrace :: StTrace -> StGraph
-graphTrace = graphTrace' >>> swap >>> uncurry insNode
+graphTrace = graphTrace' >>> swap >>> uncurry insNode -- insert the last unmerged node
 
 graphTrace' :: StTrace -> StGraph'
 graphTrace' = foldl' insEvent initGr
