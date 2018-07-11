@@ -2,7 +2,6 @@
 
 module Main where
 
-
 import Lib
 import Control.Arrow
 import Control.Monad.State.Lazy
@@ -39,7 +38,7 @@ import qualified Data.ByteString.Char8 as BC
 -- DOT format out
 import qualified Data.Graph.Inductive.Graph as Graph
 import Data.Graph.Inductive.Graph (Node, LNode, Edge, LEdge, UEdge,
-                                   labNodes, labEdges, mkGraph,
+                                   order, labNodes, labEdges, mkGraph,
                                    insNode, insEdge, prettyPrint)
 import Data.Graph.Inductive.PatriciaTree (Gr)
 import Data.GraphViz (GraphvizParams, graphToDot,
@@ -234,12 +233,10 @@ type StGraph' = (StGraph, StNode)
 
 graphTraces :: [StTrace] -> StGraph
 graphTraces = foldl' mergeGraphs Graph.empty
--- XXX BUG because all graphs are initialized with the same node (0),
--- each thread (trace) is not distinguised in the final graph.
--- They are literally merged together :(.
 
 mergeGraphs :: StGraph -> StTrace -> StGraph
-mergeGraphs gr tr = merge' (gr, graphTrace tr)
+mergeGraphs gr tr = merge' (gr, graphTrace (emptyStNode $! order gr) tr)
+                                            -- new graph starts with a Node unique from the previous graph
     where
         -- Experimenting with arrows; sorry future self
         merge' = mergeLabNs &&& mergeLabEs >>> uncurry mkGraph
@@ -248,14 +245,14 @@ mergeGraphs gr tr = merge' (gr, graphTrace tr)
         combine f = uncurry (***) (split f) >>> uncurry (++)
         split = id &&& id
 
-graphTrace :: StTrace -> StGraph
-graphTrace = graphTrace' >>> swap >>> uncurry insNode -- insert the last unmerged node
+emptyStNode :: Node -> StNode
+emptyStNode node = makeStNode node (Sync 0 0)
 
-graphTrace' :: StTrace -> StGraph'
-graphTrace' = foldl' insEvent initGr
-    where
-        firstNode = makeStNode 0 (Sync 0 0) -- start with any 'empty' event
-        initGr = (Graph.empty, firstNode)
+graphTrace :: StNode -> StTrace -> StGraph
+graphTrace initNode = (graphTrace' initNode) >>> swap >>> uncurry insNode -- insert the last unmerged node
+
+graphTrace' :: StNode -> StTrace -> StGraph'
+graphTrace' initNode = foldl' insEvent (Graph.empty, initNode)
 
 insEvent :: StGraph' -> StEvent -> StGraph'
 insEvent gr' End = gr'
